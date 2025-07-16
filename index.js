@@ -5,7 +5,7 @@ const token = process.env.TELEGRAM_BOT_TOKEN;
 const bot = new TelegramBot(token);
 app.use(express.json());
 
-// Хранилище состояний и ID сообщений
+// Хранилище состояний и ID сообщений бота
 const state = {};
 const messageIds = {};
 
@@ -17,9 +17,9 @@ const fateResultNames = {
   '-1': 'Плохой',
   '0': 'Средний',
   '1': 'Посредственный',
-  '2': 'Неплохой',
-  '3': 'Хороший',
-  '4': 'Великолепный'
+  '2': 'Хороший',
+  '3': 'Эпический',
+  '4': 'Легендарный'
 };
 
 // Webhook
@@ -33,7 +33,6 @@ bot.setWebHook(`https://epicforgedicebot.onrender.com`);
 // Обработка /start
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  await bot.deleteMessage(chatId, msg.message_id);
   sendMainMenu(chatId, msg.message_id);
 });
 
@@ -41,11 +40,13 @@ bot.onText(/\/start/, async (msg) => {
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
+  // Удаляем сообщение бота с меню
   await bot.deleteMessage(chatId, messageId);
+  delete messageIds[`menu_${chatId}`];
 
   if (query.data === 'explosive_dice') {
     state[chatId] = 'awaiting_formula';
-    const sent = await bot.sendMessage(chatId, 'Введи формулу (например, 2d6+1d8-1 или 1d20!):', {
+    const sent = await bot.sendMessage(chatId, 'Введи формулу (2d6+1d8-1 или 1d20!):', {
       reply_to_message_id: query.message.message_id,
       reply_markup: {
         keyboard: [
@@ -67,7 +68,7 @@ bot.on('callback_query', async (query) => {
         keyboard: [
           ['1d4', '1d6', '1d8'],
           ['1d10', '1d12', '1d20'],
-          ['1d100', 'Кубы судьбы'],
+          ['1d100', 'Судьба'],
           ['Назад']
         ],
         resize_keyboard: true,
@@ -88,9 +89,10 @@ bot.on('message', async (msg) => {
 
   if (state[chatId] === 'awaiting_formula') {
     if (text === 'Назад') {
-      await bot.deleteMessage(chatId, messageId);
-      await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
-      delete messageIds[`prompt_${chatId}`];
+      if (messageIds[`prompt_${chatId}`]) {
+        await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
+        delete messageIds[`prompt_${chatId}`];
+      }
       await bot.sendMessage(chatId, 'Клавиатура убрана', {
         reply_to_message_id: messageId,
         reply_markup: { remove_keyboard: true }
@@ -99,8 +101,11 @@ bot.on('message', async (msg) => {
       sendMainMenu(chatId, messageId);
       return;
     }
-    await bot.deleteMessage(chatId, messageId);
-    await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
+    // Удаляем предыдущий запрос формулы, если он есть
+    if (messageIds[`prompt_${chatId}`]) {
+      await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
+      delete messageIds[`prompt_${chatId}`];
+    }
     const sentPrompt = await bot.sendMessage(chatId, 'Введи формулу:', {
       reply_to_message_id: messageId,
       reply_markup: {
@@ -121,10 +126,11 @@ bot.on('message', async (msg) => {
     });
     messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
   } else if (state[chatId] === 'regular_fate') {
-    await bot.deleteMessage(chatId, messageId);
     if (text === 'Назад') {
-      await bot.deleteMessage(chatId, messageIds[`dice_menu_${chatId}`].id);
-      delete messageIds[`dice_menu_${chatId}`];
+      if (messageIds[`dice_menu_${chatId}`]) {
+        await bot.deleteMessage(chatId, messageIds[`dice_menu_${chatId}`].id);
+        delete messageIds[`dice_menu_${chatId}`];
+      }
       await bot.sendMessage(chatId, 'Клавиатура убрана', {
         reply_to_message_id: messageId,
         reply_markup: { remove_keyboard: true }
@@ -132,6 +138,11 @@ bot.on('message', async (msg) => {
       delete state[chatId];
       sendMainMenu(chatId, messageId);
       return;
+    }
+    // Удаляем предыдущее меню кубов, если оно есть
+    if (messageIds[`dice_menu_${chatId}`]) {
+      await bot.deleteMessage(chatId, messageIds[`dice_menu_${chatId}`].id);
+      delete messageIds[`dice_menu_${chatId}`];
     }
     let result;
     if (text === 'Кубы судьбы') {
@@ -147,8 +158,22 @@ bot.on('message', async (msg) => {
       reply_to_message_id: messageId
     });
     messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
+    // Отправляем новое меню кубов
+    const sentMenu = await bot.sendMessage(chatId, 'Выбери куб для броска:', {
+      reply_to_message_id: messageId,
+      reply_markup: {
+        keyboard: [
+          ['1d4', '1d6', '1d8'],
+          ['1d10', '1d12', '1d20'],
+          ['1d100', 'Судьба'],
+          ['Назад']
+        ],
+        resize_keyboard: true,
+        one_time_keyboard: false
+      }
+    });
+    messageIds[`dice_menu_${chatId}`] = { id: sentMenu.message_id, timestamp: Date.now() };
   } else {
-    await bot.deleteMessage(chatId, messageId);
     await bot.sendMessage(chatId, 'Используй /start для начала', { reply_to_message_id: messageId });
   }
 });
@@ -160,8 +185,8 @@ function sendMainMenu(chatId, replyToMessageId) {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: 'Взрывные кубы', callback_data: 'explosive_dice' },
-          { text: 'Обычные/Кубы судьбы', callback_data: 'regular_fate_dice' }
+          { text: 'Взрывные/Ввод', callback_data: 'explosive_dice' },
+          { text: '1Dx/Судьба', callback_data: 'regular_fate_dice' }
         ]
       ]
     }
@@ -240,7 +265,7 @@ function rollFateDice() {
   };
 }
 
-// Чистка старых сообщений
+// Чистка старых сообщений бота
 setInterval(async () => {
   const now = Date.now();
   for (const key in messageIds) {
