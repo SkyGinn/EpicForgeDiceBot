@@ -142,7 +142,7 @@ bot.on('message', async (msg) => {
     try {
       const result = parseAndRoll(text);
       const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
-        reply_to_message_id: messageId
+        reply_to_message_id: messageId,
         parse_mode: 'HTML'
       });
       messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
@@ -184,7 +184,7 @@ bot.on('message', async (msg) => {
         result = { total: 0, rolls: ['Неверный выбор куба'] };
       }
       const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
-        reply_to_message_id: messageId
+        reply_to_message_id: messageId,
         parse_mode: 'HTML'
       });
       messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
