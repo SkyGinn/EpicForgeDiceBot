@@ -70,17 +70,15 @@ bot.on('callback_query', async (query) => {
   if (query.data === 'explosive_dice') {
     state[chatId] = 'awaiting_formula';
     try {
-      const sent = await bot.sendMessage(chatId, 'Введи формулу (2d6+1d8-1 или 1d20!):', {
+      const sent = await bot.sendMessage(chatId, 'Введи формулу (2d6+1d8-1 или 1d20!) в поле ввода и нажми "Отправить" в Telegram. Для кубов судьбы нажми <b>Судьба</b>:', {
         reply_markup: {
           keyboard: [
-            ['1', '2', '3', '4', '5'],
-            ['6', '7', '8', '9', '0'],
-            ['d', 'f', '!', '+', '-'],
-            ['Назад']
+            ['Судьба', 'НАЗАД']
           ],
           resize_keyboard: true,
           one_time_keyboard: false
-        }
+        },
+        parse_mode: 'HTML'
       });
       messageIds[`prompt_${chatId}`] = { id: sent.message_id, timestamp: Date.now() };
     } catch (e) {
@@ -118,7 +116,7 @@ bot.on('message', async (msg) => {
   if (text.startsWith('/')) return;
 
   if (state[chatId] === 'awaiting_formula') {
-    if (text === 'Назад') {
+    if (text === 'НАЗАД') {
       if (messageIds[`prompt_${chatId}`]) {
         try {
           await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
@@ -139,6 +137,19 @@ bot.on('message', async (msg) => {
       }
       return;
     }
+    if (text === 'Судьба') {
+      try {
+        const result = rollFateDice();
+        const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
+          reply_to_message_id: messageId,
+          parse_mode: 'HTML'
+        });
+        messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
+      } catch (e) {
+        console.error('Error processing fate dice:', e.message);
+      }
+      return;
+    }
     try {
       const result = parseAndRoll(text);
       const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
@@ -146,9 +157,11 @@ bot.on('message', async (msg) => {
         parse_mode: 'HTML'
       });
       messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
-      // Не отправляем новое сообщение с клавиатурой, оставляем существующую
     } catch (e) {
       console.error('Error processing formula:', e.message);
+      await bot.sendMessage(chatId, 'Неверная формула. Пример: 2d6+1d8-1 или 1d20! или 4f', {
+        reply_to_message_id: messageId
+      });
     }
   } else if (state[chatId] === 'regular_fate') {
     if (text === 'Назад') {
@@ -188,7 +201,6 @@ bot.on('message', async (msg) => {
         parse_mode: 'HTML'
       });
       messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
-      // Не отправляем новое сообщение с клавиатурой, оставляем существующую
     } catch (e) {
       console.error('Error processing dice selection:', e.message);
     }
@@ -271,7 +283,7 @@ function parseAndRoll(formula) {
       const sum = rolls.reduce((a, b) => a + b, 0);
       total += (parts[i - 1] === '-' ? -1 : 1) * sum;
       results.push(`4f: [${rolls.map(r => r === -1 ? ' - ' : r === 0 ? '   ' : ' + ').join(' | ')}]`);
-      fateResult =  `<b>${fateResultNames[sum] || ''}</b>`;
+      fateResult = `<b>${fateResultNames[sum] || ''}</b>`;
     }
   }
 
