@@ -250,7 +250,7 @@ function parseAndRoll(formula) {
     if (/^\d+$/.test(part)) {
       const value = parseInt(part);
       total += (parts[i - 1] === '-' ? -1 : 1) * value;
-      results.push(`${parts[i - 1] || ''}${part}`);
+      results.push(`(${parts[i - 1] || '+'}${part})`);
       continue;
     }
     const match = part.match(/(\d+)([df])(\d+)?(!)?/);
