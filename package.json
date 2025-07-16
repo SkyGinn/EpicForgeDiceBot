@@ -1,0 +1,13 @@
+{
+  "name": "dnd-dice-bot",
+  "version": "1.0.0",
+  "description": "D&D Dice Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.17.1",
+    "node-telegram-bot-api": "^0.61.0"
+  }
+}
