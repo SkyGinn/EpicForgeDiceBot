@@ -24,8 +24,13 @@ const fateResultNames = {
 
 // Webhook
 app.post('/', (req, res) => {
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
+  try {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+  } catch (e) {
+    console.error('Error processing webhook update:', e.message);
+    res.sendStatus(500);
+  }
 });
 
 bot.setWebHook(`https://epicforgedicebot.onrender.com`);
@@ -33,13 +38,27 @@ bot.setWebHook(`https://epicforgedicebot.onrender.com`);
 // Обработка /start
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  sendMainMenu(chatId, msg.message_id);
+  try {
+    sendMainMenu(chatId, msg.message_id);
+  } catch (e) {
+    console.error('Error handling /start:', e.message);
+  }
 });
 
 // Обработка callback-запросов (инлайн-кнопки)
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
+  const queryId = query.id;
+  console.log(`Received callback_query: chatId=${chatId}, data=${query.data}`);
+
+  // Подтверждаем callback
+  try {
+    await bot.answerCallbackQuery(queryId);
+  } catch (e) {
+    console.error('Error answering callback query:', e.message);
+  }
+
   // Удаляем сообщение бота с меню
   try {
     await bot.deleteMessage(chatId, messageId);
@@ -94,6 +113,7 @@ bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
   const messageId = msg.message_id;
+  console.log(`Received message: chatId=${chatId}, text=${text}`);
 
   if (text.startsWith('/')) return;
 
@@ -119,35 +139,14 @@ bot.on('message', async (msg) => {
       }
       return;
     }
-    // Удаляем предыдущий запрос формулы, если он есть
-    if (messageIds[`prompt_${chatId}`]) {
-      try {
-        await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
-        delete messageIds[`prompt_${chatId}`];
-      } catch (e) {
-        console.error('Error deleting prompt:', e.message);
-      }
-    }
     try {
-      const sentPrompt = await bot.sendMessage(chatId, 'Введи формулу:', {
-        reply_to_message_id: messageId,
-        reply_markup: {
-          keyboard: [
-            ['1', '2', '3', '4', '5'],
-            ['6', '7', '8', '9', '0'],
-            ['d', 'f', '!', '+', '-'],
-            ['Назад']
-          ],
-          resize_keyboard: true,
-          one_time_keyboard: false
-        }
-      });
-      messageIds[`prompt_${chatId}`] = { id: sentPrompt.message_id, timestamp: Date.now() };
       const result = parseAndRoll(text);
       const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
         reply_to_message_id: messageId
+        parse_mode: 'HTML'
       });
       messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
+      // Не отправляем новое сообщение с клавиатурой, оставляем существующую
     } catch (e) {
       console.error('Error processing formula:', e.message);
     }
@@ -173,15 +172,6 @@ bot.on('message', async (msg) => {
       }
       return;
     }
-    // Удаляем предыдущее меню кубов, если оно есть
-    if (messageIds[`dice_menu_${chatId}`]) {
-      try {
-        await bot.deleteMessage(chatId, messageIds[`dice_menu_${chatId}`].id);
-        delete messageIds[`dice_menu_${chatId}`];
-      } catch (e) {
-        console.error('Error deleting dice menu:', e.message);
-      }
-    }
     let result;
     try {
       if (text === 'Судьба') {
@@ -195,23 +185,10 @@ bot.on('message', async (msg) => {
       }
       const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
         reply_to_message_id: messageId
+        parse_mode: 'HTML'
       });
       messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
-      // Отправляем новое меню кубов
-      const sentMenu = await bot.sendMessage(chatId, 'Выбери куб для броска:', {
-        reply_to_message_id: messageId,
-        reply_markup: {
-          keyboard: [
-            ['1d4', '1d6', '1d8'],
-            ['1d10', '1d12', '1d20'],
-            ['1d100', 'Судьба'],
-            ['Назад']
-          ],
-          resize_keyboard: true,
-          one_time_keyboard: false
-        }
-      });
-      messageIds[`dice_menu_${chatId}`] = { id: sentMenu.message_id, timestamp: Date.now() };
+      // Не отправляем новое сообщение с клавиатурой, оставляем существующую
     } catch (e) {
       console.error('Error processing dice selection:', e.message);
     }
@@ -293,8 +270,8 @@ function parseAndRoll(formula) {
       });
       const sum = rolls.reduce((a, b) => a + b, 0);
       total += (parts[i - 1] === '-' ? -1 : 1) * sum;
-      results.push(rolls.map(r => r === -1 ? ' - ' : r === 0 ? '   ' : ' + ').join(' , '));
-      fateResult = fateResultNames[sum] || '';
+      results.push(`4f: [${rolls.map(r => r === -1 ? ' - ' : r === 0 ? '   ' : ' + ').join(' | ')}]`);
+      fateResult =  `<b>${fateResultNames[sum] || ''}</b>`;
     }
   }
 
@@ -310,8 +287,8 @@ function rollFateDice() {
   const total = rolls.reduce((sum, r) => sum + r, 0);
   return {
     total,
-    rolls: [rolls.map(r => r === -1 ? ' - ' : r === 0 ? '   ' : ' + ').join(' , ')],
-    fateResult: fateResultNames[total] || ''
+    rolls: [`4f: [${rolls.map(r => r === -1 ? ' - ' : r === 0 ? '   ' : ' + ').join(' | ')}]`],
+    fateResult: `<b>${fateResultNames[total] || ''}</b>`
   };
 }
 
