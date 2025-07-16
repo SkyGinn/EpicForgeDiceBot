@@ -41,41 +41,51 @@ bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
   // Удаляем сообщение бота с меню
-  await bot.deleteMessage(chatId, messageId);
-  delete messageIds[`menu_${chatId}`];
+  try {
+    await bot.deleteMessage(chatId, messageId);
+    delete messageIds[`menu_${chatId}`];
+  } catch (e) {
+    console.error('Error deleting menu message:', e.message);
+  }
 
   if (query.data === 'explosive_dice') {
     state[chatId] = 'awaiting_formula';
-    const sent = await bot.sendMessage(chatId, 'Введи формулу (2d6+1d8-1 или 1d20!):', {
-      reply_to_message_id: query.message.message_id,
-      reply_markup: {
-        keyboard: [
-          ['1', '2', '3', '4', '5'],
-          ['6', '7', '8', '9', '0'],
-          ['d', 'f', '!', '+', '-'],
-          ['Назад']
-        ],
-        resize_keyboard: true,
-        one_time_keyboard: false
-      }
-    });
-    messageIds[`prompt_${chatId}`] = { id: sent.message_id, timestamp: Date.now() };
+    try {
+      const sent = await bot.sendMessage(chatId, 'Введи формулу (2d6+1d8-1 или 1d20!):', {
+        reply_markup: {
+          keyboard: [
+            ['1', '2', '3', '4', '5'],
+            ['6', '7', '8', '9', '0'],
+            ['d', 'f', '!', '+', '-'],
+            ['Назад']
+          ],
+          resize_keyboard: true,
+          one_time_keyboard: false
+        }
+      });
+      messageIds[`prompt_${chatId}`] = { id: sent.message_id, timestamp: Date.now() };
+    } catch (e) {
+      console.error('Error sending formula prompt:', e.message);
+    }
   } else if (query.data === 'regular_fate_dice') {
     state[chatId] = 'regular_fate';
-    const sent = await bot.sendMessage(chatId, 'Выбери куб для броска:', {
-      reply_to_message_id: query.message.message_id,
-      reply_markup: {
-        keyboard: [
-          ['1d4', '1d6', '1d8'],
-          ['1d10', '1d12', '1d20'],
-          ['1d100', 'Судьба'],
-          ['Назад']
-        ],
-        resize_keyboard: true,
-        one_time_keyboard: false
-      }
-    });
-    messageIds[`dice_menu_${chatId}`] = { id: sent.message_id, timestamp: Date.now() };
+    try {
+      const sent = await bot.sendMessage(chatId, 'Выбери куб для броска:', {
+        reply_markup: {
+          keyboard: [
+            ['1d4', '1d6', '1d8'],
+            ['1d10', '1d12', '1d20'],
+            ['1d100', 'Судьба'],
+            ['Назад']
+          ],
+          resize_keyboard: true,
+          one_time_keyboard: false
+        }
+      });
+      messageIds[`dice_menu_${chatId}`] = { id: sent.message_id, timestamp: Date.now() };
+    } catch (e) {
+      console.error('Error sending dice menu:', e.message);
+    }
   }
 });
 
@@ -90,109 +100,149 @@ bot.on('message', async (msg) => {
   if (state[chatId] === 'awaiting_formula') {
     if (text === 'Назад') {
       if (messageIds[`prompt_${chatId}`]) {
-        await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
-        delete messageIds[`prompt_${chatId}`];
+        try {
+          await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
+          delete messageIds[`prompt_${chatId}`];
+        } catch (e) {
+          console.error('Error deleting prompt:', e.message);
+        }
       }
-      await bot.sendMessage(chatId, 'Клавиатура убрана', {
-        reply_to_message_id: messageId,
-        reply_markup: { remove_keyboard: true }
-      });
-      delete state[chatId];
-      sendMainMenu(chatId, messageId);
+      try {
+        await bot.sendMessage(chatId, 'Клавиатура убрана', {
+          reply_to_message_id: messageId,
+          reply_markup: { remove_keyboard: true }
+        });
+        delete state[chatId];
+        sendMainMenu(chatId, messageId);
+      } catch (e) {
+        console.error('Error sending back response:', e.message);
+      }
       return;
     }
     // Удаляем предыдущий запрос формулы, если он есть
     if (messageIds[`prompt_${chatId}`]) {
-      await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
-      delete messageIds[`prompt_${chatId}`];
-    }
-    const sentPrompt = await bot.sendMessage(chatId, 'Введи формулу:', {
-      reply_to_message_id: messageId,
-      reply_markup: {
-        keyboard: [
-          ['1', '2', '3', '4', '5'],
-          ['6', '7', '8', '9', '0'],
-          ['d', 'f', '!', '+', '-'],
-          ['Назад']
-        ],
-        resize_keyboard: true,
-        one_time_keyboard: false
+      try {
+        await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
+        delete messageIds[`prompt_${chatId}`];
+      } catch (e) {
+        console.error('Error deleting prompt:', e.message);
       }
-    });
-    messageIds[`prompt_${chatId}`] = { id: sentPrompt.message_id, timestamp: Date.now() };
-    const result = parseAndRoll(text);
-    const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
-      reply_to_message_id: messageId
-    });
-    messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
+    }
+    try {
+      const sentPrompt = await bot.sendMessage(chatId, 'Введи формулу:', {
+        reply_to_message_id: messageId,
+        reply_markup: {
+          keyboard: [
+            ['1', '2', '3', '4', '5'],
+            ['6', '7', '8', '9', '0'],
+            ['d', 'f', '!', '+', '-'],
+            ['Назад']
+          ],
+          resize_keyboard: true,
+          one_time_keyboard: false
+        }
+      });
+      messageIds[`prompt_${chatId}`] = { id: sentPrompt.message_id, timestamp: Date.now() };
+      const result = parseAndRoll(text);
+      const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
+        reply_to_message_id: messageId
+      });
+      messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
+    } catch (e) {
+      console.error('Error processing formula:', e.message);
+    }
   } else if (state[chatId] === 'regular_fate') {
     if (text === 'Назад') {
       if (messageIds[`dice_menu_${chatId}`]) {
-        await bot.deleteMessage(chatId, messageIds[`dice_menu_${chatId}`].id);
-        delete messageIds[`dice_menu_${chatId}`];
+        try {
+          await bot.deleteMessage(chatId, messageIds[`dice_menu_${chatId}`].id);
+          delete messageIds[`dice_menu_${chatId}`];
+        } catch (e) {
+          console.error('Error deleting dice menu:', e.message);
+        }
       }
-      await bot.sendMessage(chatId, 'Клавиатура убрана', {
-        reply_to_message_id: messageId,
-        reply_markup: { remove_keyboard: true }
-      });
-      delete state[chatId];
-      sendMainMenu(chatId, messageId);
+      try {
+        await bot.sendMessage(chatId, 'Клавиатура убрана', {
+          reply_to_message_id: messageId,
+          reply_markup: { remove_keyboard: true }
+        });
+        delete state[chatId];
+        sendMainMenu(chatId, messageId);
+      } catch (e) {
+        console.error('Error sending back response:', e.message);
+      }
       return;
     }
     // Удаляем предыдущее меню кубов, если оно есть
     if (messageIds[`dice_menu_${chatId}`]) {
-      await bot.deleteMessage(chatId, messageIds[`dice_menu_${chatId}`].id);
-      delete messageIds[`dice_menu_${chatId}`];
+      try {
+        await bot.deleteMessage(chatId, messageIds[`dice_menu_${chatId}`].id);
+        delete messageIds[`dice_menu_${chatId}`];
+      } catch (e) {
+        console.error('Error deleting dice menu:', e.message);
+      }
     }
     let result;
-    if (text === 'Кубы судьбы') {
-      result = rollFateDice();
-    } else if (/1d\d+/.test(text)) {
-      const sides = parseInt(text.match(/1d(\d+)/)[1]);
-      const roll = Math.floor(Math.random() * sides) + 1;
-      result = { total: roll, rolls: [`${roll} [d${sides}]`] };
-    } else {
-      result = { total: 0, rolls: ['Неверный выбор куба'] };
-    }
-    const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
-      reply_to_message_id: messageId
-    });
-    messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
-    // Отправляем новое меню кубов
-    const sentMenu = await bot.sendMessage(chatId, 'Выбери куб для броска:', {
-      reply_to_message_id: messageId,
-      reply_markup: {
-        keyboard: [
-          ['1d4', '1d6', '1d8'],
-          ['1d10', '1d12', '1d20'],
-          ['1d100', 'Судьба'],
-          ['Назад']
-        ],
-        resize_keyboard: true,
-        one_time_keyboard: false
+    try {
+      if (text === 'Судьба') {
+        result = rollFateDice();
+      } else if (/1d\d+/.test(text)) {
+        const sides = parseInt(text.match(/1d(\d+)/)[1]);
+        const roll = Math.floor(Math.random() * sides) + 1;
+        result = { total: roll, rolls: [`${roll} [d${sides}]`] };
+      } else {
+        result = { total: 0, rolls: ['Неверный выбор куба'] };
       }
-    });
-    messageIds[`dice_menu_${chatId}`] = { id: sentMenu.message_id, timestamp: Date.now() };
+      const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
+        reply_to_message_id: messageId
+      });
+      messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
+      // Отправляем новое меню кубов
+      const sentMenu = await bot.sendMessage(chatId, 'Выбери куб для броска:', {
+        reply_to_message_id: messageId,
+        reply_markup: {
+          keyboard: [
+            ['1d4', '1d6', '1d8'],
+            ['1d10', '1d12', '1d20'],
+            ['1d100', 'Судьба'],
+            ['Назад']
+          ],
+          resize_keyboard: true,
+          one_time_keyboard: false
+        }
+      });
+      messageIds[`dice_menu_${chatId}`] = { id: sentMenu.message_id, timestamp: Date.now() };
+    } catch (e) {
+      console.error('Error processing dice selection:', e.message);
+    }
   } else {
-    await bot.sendMessage(chatId, 'Используй /start для начала', { reply_to_message_id: messageId });
+    try {
+      await bot.sendMessage(chatId, 'Используй /start для начала', { reply_to_message_id: messageId });
+    } catch (e) {
+      console.error('Error sending default response:', e.message);
+    }
   }
 });
 
 // Главное меню
 function sendMainMenu(chatId, replyToMessageId) {
-  bot.sendMessage(chatId, '🎲 Выбери режим:', {
-    reply_to_message_id: replyToMessageId,
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: 'Взрывные/Ввод', callback_data: 'explosive_dice' },
-          { text: '1Dx/Судьба', callback_data: 'regular_fate_dice' }
+  try {
+    bot.sendMessage(chatId, '🎲 Выбери режим:', {
+      reply_to_message_id: replyToMessageId,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'Взрывные/Ввод', callback_data: 'explosive_dice' },
+            { text: '1Dx/Судьба', callback_data: 'regular_fate_dice' }
+          ]
         ]
-      ]
-    }
-  }).then(sent => {
-    messageIds[`menu_${chatId}`] = { id: sent.message_id, timestamp: Date.now() };
-  });
+      }
+    }).then(sent => {
+      messageIds[`menu_${chatId}`] = { id: sent.message_id, timestamp: Date.now() };
+    });
+  } catch (e) {
+    console.error('Error sending main menu:', e.message);
+  }
 }
 
 // Парсинг и бросок кубов
@@ -271,8 +321,12 @@ setInterval(async () => {
   for (const key in messageIds) {
     if (key.startsWith('result_') && now - messageIds[key].timestamp > 3600000) {
       const [_, chatId, id] = key.split('_');
-      await bot.deleteMessage(chatId, id);
-      delete messageIds[key];
+      try {
+        await bot.deleteMessage(chatId, id);
+        delete messageIds[key];
+      } catch (e) {
+        console.error('Error deleting old result:', e.message);
+      }
     }
   }
 }, 3600000);
