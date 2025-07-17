@@ -1,325 +1,552 @@
-const TelegramBot = require('node-telegram-bot-api');
-const express = require('express');
-const app = express();
-const token = process.env.TELEGRAM_BOT_TOKEN;
-const bot = new TelegramBot(token);
-app.use(express.json());
+const { Telegraf } = require('telegraf');
+const { MongoClient } = require('mongodb');
+const moment = require('moment-timezone');
 
-// Хранилище состояний и ID сообщений бота
-const state = {};
-const messageIds = {};
+const bot = new Telegraf(process.env.BOT_TOKEN);
+const mongoUri = process.env.MONGODB_URI;
+const adminId = process.env.ADMIN_ID;
 
-// Шкала для кубов судьбы
-const fateResultNames = {
-  '-4': 'Ужасающий',
-  '-3': 'Катастрофический',
-  '-2': 'Ужасный',
-  '-1': 'Плохой',
-  '0': 'Средний',
-  '1': 'Посредственный',
-  '2': 'Хороший',
-  '3': 'Эпический',
-  '4': 'Легендарный'
-};
+const client = new MongoClient(mongoUri);
+let db;
 
-// Webhook
-app.post('/', (req, res) => {
-  try {
-    bot.processUpdate(req.body);
-    res.sendStatus(200);
-  } catch (e) {
-    console.error('Error processing webhook update:', e.message);
-    res.sendStatus(500);
-  }
-});
+// Состояния для ожидания ввода
+const userStates = {};
 
-bot.setWebHook(`https://epicforgedicebot.onrender.com`);
+// Подключение к MongoDB
+async function connectToMongo() {
+  await client.connect();
+  db = client.db('dicebot');
+  console.log('Connected to MongoDB');
+}
 
-// Обработка /start
-bot.onText(/\/start/, async (msg) => {
-  const chatId = msg.chat.id;
-  try {
-    sendMainMenu(chatId, msg.message_id);
-  } catch (e) {
-    console.error('Error handling /start:', e.message);
-  }
-});
-
-// Обработка callback-запросов (инлайн-кнопки)
-bot.on('callback_query', async (query) => {
-  const chatId = query.message.chat.id;
-  const messageId = query.message.message_id;
-  const queryId = query.id;
-  console.log(`Received callback_query: chatId=${chatId}, data=${query.data}`);
-
-  // Подтверждаем callback
-  try {
-    await bot.answerCallbackQuery(queryId);
-  } catch (e) {
-    console.error('Error answering callback query:', e.message);
-  }
-
-  // Удаляем сообщение бота с меню
-  try {
-    await bot.deleteMessage(chatId, messageId);
-    delete messageIds[`menu_${chatId}`];
-  } catch (e) {
-    console.error('Error deleting menu message:', e.message);
-  }
-
-  if (query.data === 'explosive_dice') {
-    state[chatId] = 'awaiting_formula';
-    try {
-      const sent = await bot.sendMessage(chatId, 'Введи формулу (2d6+1d8-1 или 1d20!) в поле ввода и нажми "Отправить" в Telegram. Для кубов судьбы нажми <b>Судьба</b>:', {
-        reply_markup: {
-          keyboard: [
-            ['Судьба', 'НАЗАД']
-          ],
-          resize_keyboard: true,
-          one_time_keyboard: false
-        },
-        parse_mode: 'HTML'
-      });
-      messageIds[`prompt_${chatId}`] = { id: sent.message_id, timestamp: Date.now() };
-    } catch (e) {
-      console.error('Error sending formula prompt:', e.message);
-    }
-  } else if (query.data === 'regular_fate_dice') {
-    state[chatId] = 'regular_fate';
-    try {
-      const sent = await bot.sendMessage(chatId, 'Выбери куб для броска:', {
-        reply_markup: {
-          keyboard: [
-            ['1d4', '1d6', '1d8'],
-            ['1d10', '1d12', '1d20'],
-            ['1d100', 'Судьба'],
-            ['Назад']
-          ],
-          resize_keyboard: true,
-          one_time_keyboard: false
-        }
-      });
-      messageIds[`dice_menu_${chatId}`] = { id: sent.message_id, timestamp: Date.now() };
-    } catch (e) {
-      console.error('Error sending dice menu:', e.message);
+// Проверка активности Мастеров (раз в минуту)
+setInterval(async () => {
+  const masters = await db.collection('masters').find().toArray();
+  const now = Date.now();
+  for (const master of masters) {
+    if (master.isActive && now - master.activatedAt > 24 * 60 * 60 * 1000) {
+      await db.collection('masters').updateOne(
+        { _id: master._id },
+        { $set: { isActive: false } }
+      );
     }
   }
-});
+}, 60 * 1000);
 
-// Обработка текстовых сообщений
-bot.on('message', async (msg) => {
-  const chatId = msg.chat.id;
-  const text = msg.text;
-  const messageId = msg.message_id;
-  console.log(`Received message: chatId=${chatId}, text=${text}`);
+// Генерация кода приглашения
+function generateInviteCode() {
+  return `MASTER_${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+}
 
-  if (text.startsWith('/')) return;
+// Парсинг формулы кубов
+function parseDiceFormula(formula) {
+  const diceRegex = /^(\d*)d(\d+)([+-]?\d*)?(!)?$/i;
+  const fateRegex = /^(\d*)f$/i;
+  if (diceRegex.test(formula)) {
+    const [, count = '1', sides, modifier = '0', explode] = formula.match(diceRegex);
+    return { type: 'dice', count: parseInt(count), sides: parseInt(sides), modifier: parseInt(modifier || '0'), explode: !!explode };
+  } else if (fateRegex.test(formula)) {
+    const [, count = '4'] = formula.match(fateRegex);
+    return { type: 'fate', count: parseInt(count) };
+  }
+  return null;
+}
 
-  if (state[chatId] === 'awaiting_formula') {
-    if (text === 'НАЗАД') {
-      if (messageIds[`prompt_${chatId}`]) {
-        try {
-          await bot.deleteMessage(chatId, messageIds[`prompt_${chatId}`].id);
-          delete messageIds[`prompt_${chatId}`];
-        } catch (e) {
-          console.error('Error deleting prompt:', e.message);
-        }
-      }
-      try {
-        await bot.sendMessage(chatId, 'Клавиатура убрана', {
-          reply_to_message_id: messageId,
-          reply_markup: { remove_keyboard: true }
-        });
-        delete state[chatId];
-        sendMainMenu(chatId, messageId);
-      } catch (e) {
-        console.error('Error sending back response:', e.message);
-      }
-      return;
+// Выполнение броска
+function rollDice(formula) {
+  const parsed = parseDiceFormula(formula);
+  if (!parsed) return null;
+  const { type, count, sides, modifier, explode } = parsed;
+  if (type === 'dice') {
+    const rolls = [];
+    let total = modifier;
+    for (let i = 0; i < count; i++) {
+      const roll = Math.floor(Math.random() * sides) + 1;
+      rolls.push(roll);
+      total += roll;
+      if (explode && roll === sides) i--;
     }
-    if (text === 'Судьба') {
-      try {
-        const result = rollFateDice();
-        const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
-          reply_to_message_id: messageId,
-          parse_mode: 'HTML'
-        });
-        messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
-      } catch (e) {
-        console.error('Error processing fate dice:', e.message);
-      }
-      return;
+    return { rolls, total, sides, modifier };
+  } else if (type === 'fate') {
+    const rolls = [];
+    let total = 0;
+    for (let i = 0; i < count; i++) {
+      const roll = Math.floor(Math.random() * 3) - 1; // -1, 0, +1
+      rolls.push(roll);
+      total += roll;
     }
-    try {
-      const result = parseAndRoll(text);
-      const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
-        reply_to_message_id: messageId,
-        parse_mode: 'HTML'
-      });
-      messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
-    } catch (e) {
-      console.error('Error processing formula:', e.message);
-      await bot.sendMessage(chatId, 'Неверная формула. Пример: 2d6+1d8-1 или 1d20! или 4f', {
-        reply_to_message_id: messageId
-      });
-    }
-  } else if (state[chatId] === 'regular_fate') {
-    if (text === 'Назад') {
-      if (messageIds[`dice_menu_${chatId}`]) {
-        try {
-          await bot.deleteMessage(chatId, messageIds[`dice_menu_${chatId}`].id);
-          delete messageIds[`dice_menu_${chatId}`];
-        } catch (e) {
-          console.error('Error deleting dice menu:', e.message);
-        }
-      }
-      try {
-        await bot.sendMessage(chatId, 'Клавиатура убрана', {
-          reply_to_message_id: messageId,
-          reply_markup: { remove_keyboard: true }
-        });
-        delete state[chatId];
-        sendMainMenu(chatId, messageId);
-      } catch (e) {
-        console.error('Error sending back response:', e.message);
-      }
-      return;
-    }
-    let result;
-    try {
-      if (text === 'Судьба') {
-        result = rollFateDice();
-      } else if (/1d\d+/.test(text)) {
-        const sides = parseInt(text.match(/1d(\d+)/)[1]);
-        const roll = Math.floor(Math.random() * sides) + 1;
-        result = { total: roll, rolls: [`${roll} [d${sides}]`] };
-      } else {
-        result = { total: 0, rolls: ['Неверный выбор куба'] };
-      }
-      const sent = await bot.sendMessage(chatId, `Бросок ${result.rolls.join(' + ')} = ${result.total}${result.fateResult ? `\nРезультат: ${result.fateResult}` : ''}`, {
-        reply_to_message_id: messageId,
-        parse_mode: 'HTML'
-      });
-      messageIds[`result_${chatId}_${sent.message_id}`] = { id: sent.message_id, timestamp: Date.now() };
-    } catch (e) {
-      console.error('Error processing dice selection:', e.message);
-    }
+    return { rolls, total };
+  }
+  return null;
+}
+
+// Форматирование результата
+function formatResult(formula, result) {
+  if (!result) return 'Неверная формула!';
+  if (result.sides) {
+    const rollStr = result.rolls.map(r => `${r} [d${result.sides}]`).join(', ');
+    const modStr = result.modifier ? ` + (${result.modifier})` : '';
+    return `Бросок ${rollStr}${modStr} = ${result.total}`;
   } else {
-    try {
-      await bot.sendMessage(chatId, 'Используй /start для начала', { reply_to_message_id: messageId });
-    } catch (e) {
-      console.error('Error sending default response:', e.message);
+    const rollStr = result.rolls.map(r => r === 1 ? '+' : r === 0 ? ' ' : '-').join(' | ');
+    const resultStr = result.total > 0 ? 'Хорошо' : result.total < 0 ? 'Плохо' : 'Посредственно';
+    return `Бросок судьбы: ${rollStr} = ${result.total}\nРезультат: ${resultStr}`;
+  }
+}
+
+// Форматирование проверки
+function formatCheck(formula, dc, result) {
+  if (!result) return 'Неверная формула!';
+  const rollStr = result.rolls.map(r => `${r} [d${result.sides}]`).join(', ');
+  const modStr = result.modifier ? ` + (${result.modifier})` : '';
+  const success = result.total >= dc ? 'Успех' : 'Провал';
+  return `Проверка: ${rollStr}${modStr} = ${result.total} (${success} против DC ${dc})`;
+}
+
+// Форматирование судьбы против DC
+function formatFateCheck(dc, result) {
+  const rollStr = result.rolls.map(r => r === 1 ? '+' : r === 0 ? ' ' : '-').join(' | ');
+  const resultStr = result.total >= dc ? 'Успех' : 'Провал';
+  return `Проверка судьбы: ${rollStr} = ${result.total}\nРезультат: ${resultStr} (против DC ${dc})`;
+}
+
+// Проверка, является ли пользователь Мастером
+async function isMaster(userId, groupId) {
+  const master = await db.collection('masters').findOne({ userId: userId.toString(), groupId: groupId.toString(), isActive: true });
+  return !!master;
+}
+
+// Проверка, является ли пользователь админом
+function isAdmin(userId) {
+  return userId.toString() === adminId;
+}
+
+// Запуск бота
+bot.start(async (ctx) => {
+  const chatId = ctx.chat.id;
+  const userId = ctx.from.id;
+  const username = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
+
+  if (chatId < 0) { // УЛИЦА
+    const masters = await db.collection('masters').find({ groupId: chatId.toString(), isActive: true }).toArray();
+    if (masters.length === 0) {
+      await ctx.reply('Подтверди силу Мастера!', {
+        reply_markup: {
+          inline_keyboard: [[{ text: 'Подтверди силу Мастера!', callback_data: 'confirm_master' }]]
+        }
+      });
+    } else {
+      await ctx.reply('Выбери режим:', {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: 'nDx+!+F/Судьба', callback_data: 'dice_mode' }],
+            [{ text: '1Dx/Судьба', callback_data: 'single_dice_mode' }]
+          ]
+        }
+      });
     }
+  } else { // ДОМ
+    const master = await db.collection('masters').findOne({ userId: userId.toString() });
+    const isAdminUser = isAdmin(userId);
+    const keyboard = [
+      [{ text: 'cfg', callback_data: 'open_config' }],
+      [{ text: 'nDx+!+F/Судьба', callback_data: 'dice_mode' }],
+      [{ text: '1Dx/Судьба', callback_data: 'single_dice_mode' }]
+    ];
+    if (master) {
+      keyboard.push(
+        [{ text: 'Проверка', callback_data: 'check' }],
+        [{ text: 'Судьба против DC', callback_data: 'fate_check' }]
+      );
+    }
+    if (isAdminUser) {
+      keyboard.push([{ text: 'Админ-панель', callback_data: 'admin_panel' }]);
+    }
+    await ctx.reply('Выбери режим:', {
+      reply_markup: { inline_keyboard: keyboard }
+    });
   }
 });
 
-// Главное меню
-function sendMainMenu(chatId, replyToMessageId) {
-  try {
-    bot.sendMessage(chatId, '🎲 Выбери режим:', {
-      reply_to_message_id: replyToMessageId,
+// Обработка кнопок
+bot.action('dice_mode', async (ctx) => {
+  await ctx.deleteMessage();
+  userStates[ctx.from.id] = { state: 'awaiting_dice_formula' };
+  await ctx.reply('Введи формулу: nDx[+m][!] или nF (например, 2d6+1d8, 4f):');
+});
+
+bot.action('single_dice_mode', async (ctx) => {
+  await ctx.deleteMessage();
+  userStates[ctx.from.id] = { state: 'awaiting_single_dice' };
+  await ctx.reply('Введи куб: 1Dx или F (например, 1d20, F):');
+});
+
+bot.action('check', async (ctx) => {
+  const userId = ctx.from.id;
+  if (await isMaster(userId, ctx.chat.id.toString())) {
+    await ctx.deleteMessage();
+    userStates[userId] = { state: 'awaiting_check' };
+    await ctx.reply('Введи формулу и DC: nDx[+m] DC (например, 1d20+5 15):');
+  } else {
+    await ctx.answerCbQuery('Ты не Мастер!');
+  }
+});
+
+bot.action('fate_check', async (ctx) => {
+  const userId = ctx.from.id;
+  if (await isMaster(userId, ctx.chat.id.toString())) {
+    await ctx.deleteMessage();
+    userStates[userId] = { state: 'awaiting_fate_check' };
+    await ctx.reply('Введи DC: (например, 2):');
+  } else {
+    await ctx.answerCbQuery('Ты не Мастер!');
+  }
+});
+
+bot.action('open_config', async (ctx) => {
+  const userId = ctx.from.id;
+  if (await db.collection('masters').findOne({ userId: userId.toString() })) {
+    await ctx.deleteMessage();
+    await ctx.reply('Настройки Мастера:', {
       reply_markup: {
         inline_keyboard: [
-          [
-            { text: 'Взрывные/Ввод', callback_data: 'explosive_dice' },
-            { text: '1Dx/Судьба', callback_data: 'regular_fate_dice' }
-          ]
+          [{ text: 'Активация', callback_data: 'reactivate_master' }],
+          [{ text: 'Деактивация', callback_data: 'deactivate_master' }]
         ]
       }
-    }).then(sent => {
-      messageIds[`menu_${chatId}`] = { id: sent.message_id, timestamp: Date.now() };
     });
-  } catch (e) {
-    console.error('Error sending main menu:', e.message);
+  } else {
+    await ctx.answerCbQuery('Ты не Мастер!');
   }
-}
+});
 
-// Парсинг и бросок кубов
-function parseAndRoll(formula) {
-  const regex = /(\d+[df]\d*!?|\d+[df])(?:\s*([+-])\s*(\d+[df]\d*!?|\d+[df]|\d+))*/;
-  if (!regex.test(formula)) return { total: 0, rolls: ['Неверная формула. Пример: 2d6+1d8-1 или 1d20! или 4f'] };
+bot.action('admin_panel', async (ctx) => {
+  const userId = ctx.from.id;
+  if (isAdmin(userId)) {
+    await ctx.deleteMessage();
+    await ctx.reply('Админ-панель:', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: 'Сгенерировать код', callback_data: 'generate_invite' }],
+          [{ text: 'Список Мастеров', callback_data: 'list_masters' }],
+          [{ text: 'Удалить Мастера', callback_data: 'remove_master' }],
+          [{ text: 'Деактивировать Мастера', callback_data: 'deactivate_master_admin' }]
+        ]
+      }
+    });
+  } else {
+    await ctx.answerCbQuery('Ты не админ!');
+  }
+});
 
-  const parts = formula.replace(/\s/g, '').split(/([+-])/).filter(p => p);
-  let results = [];
-  let total = 0;
-  let fateResult = '';
+bot.action('generate_invite', async (ctx) => {
+  const userId = ctx.from.id;
+  if (isAdmin(userId)) {
+    const code = generateInviteCode();
+    const now = Date.now();
+    await db.collection('invites').insertOne({
+      code,
+      used: false,
+      createdBy: userId.toString(),
+      createdAt: now,
+      expiresAt: now + 24 * 60 * 60 * 1000
+    });
+    await ctx.deleteMessage();
+    await ctx.reply(code);
+  } else {
+    await ctx.answerCbQuery('Ты не админ!');
+  }
+});
 
-  for (let i = 0; i < parts.length; i++) {
-    let part = parts[i];
-    if (part === '+' || part === '-') continue;
-    if (/^\d+$/.test(part)) {
-      const value = parseInt(part);
-      total += (parts[i - 1] === '-' ? -1 : 1) * value;
-      results.push(`(${parts[i - 1] || '+'}${part})`);
-      continue;
+bot.action('list_masters', async (ctx) => {
+  const userId = ctx.from.id;
+  if (isAdmin(userId)) {
+    const masters = await db.collection('masters').find().toArray();
+    let response = 'Мастера:\n';
+    masters.forEach((m, i) => {
+      response += `${i + 1}. ${m.username}, группа: ${m.groupName}, активен: ${m.isActive ? 'да' : 'нет'}\n`;
+    });
+    await ctx.deleteMessage();
+    await ctx.reply(response || 'Мастера не найдены.');
+  } else {
+    await ctx.answerCbQuery('Ты не админ!');
+  }
+});
+
+bot.action('remove_master', async (ctx) => {
+  const userId = ctx.from.id;
+  if (isAdmin(userId)) {
+    const masters = await db.collection('masters').find().toArray();
+    const keyboard = masters.map(m => [{ text: `${m.username} - ${m.groupName}`, callback_data: `remove_${m.userId}_${m.groupId}` }]);
+    await ctx.deleteMessage();
+    await ctx.reply('Выбери Мастера для удаления:', {
+      reply_markup: { inline_keyboard: keyboard.length ? keyboard : [[{ text: 'Нет Мастеров', callback_data: 'noop' }]] }
+    });
+  } else {
+    await ctx.answerCbQuery('Ты не админ!');
+  }
+});
+
+bot.action(/remove_(.+)_(.+)/, async (ctx) => {
+  const userId = ctx.from.id;
+  if (isAdmin(userId)) {
+    const [, masterId, groupId] = ctx.match;
+    const master = await db.collection('masters').findOne({ userId: masterId, groupId });
+    await db.collection('masters').deleteOne({ userId: masterId, groupId });
+    await ctx.deleteMessage();
+    await ctx.reply(`Мастер ${master.username} удалён из группы ${master.groupName}`);
+  } else {
+    await ctx.answerCbQuery('Ты не админ!');
+  }
+});
+
+bot.action('deactivate_master_admin', async (ctx) => {
+  const userId = ctx.from.id;
+  if (isAdmin(userId)) {
+    const masters = await db.collection('masters').find({ isActive: true }).toArray();
+    const keyboard = masters.map(m => [{ text: `${m.username} - ${m.groupName}`, callback_data: `deactivate_admin_${m.userId}_${m.groupId}` }]);
+    await ctx.deleteMessage();
+    await ctx.reply('Выбери Мастера для деактивации:', {
+      reply_markup: { inline_keyboard: keyboard.length ? keyboard : [[{ text: 'Нет активных Мастеров', callback_data: 'noop' }]] }
+    });
+  } else {
+    await ctx.answerCbQuery('Ты не админ!');
+  }
+});
+
+bot.action(/deactivate_admin_(.+)_(.+)/, async (ctx) => {
+  const userId = ctx.from.id;
+  if (isAdmin(userId)) {
+    const [, masterId, groupId] = ctx.match;
+    const master = await db.collection('masters').findOne({ userId: masterId, groupId });
+    await db.collection('masters').updateOne(
+      { userId: masterId, groupId },
+      { $set: { isActive: false } }
+    );
+    await ctx.deleteMessage();
+    await ctx.reply(`Мастер ${master.username} деактивирован в группе ${master.groupName}`);
+  } else {
+    await ctx.answerCbQuery('Ты не админ!');
+  }
+});
+
+bot.action('reactivate_master', async (ctx) => {
+  const userId = ctx.from.id;
+  const masters = await db.collection('masters').find({ userId: userId.toString() }).toArray();
+  if (masters.length) {
+    if (masters.length === 1) {
+      await db.collection('masters').updateOne(
+        { userId: userId.toString(), groupId: masters[0].groupId },
+        { $set: { isActive: true, activatedAt: Date.now() } }
+      );
+      await ctx.deleteMessage();
+      await ctx.reply(`Твоя мощь пробудилась в ${masters[0].groupName}!`);
+    } else {
+      const keyboard = masters.map(m => [{ text: m.groupName, callback_data: `reactivate_group_${m.groupId}` }]);
+      await ctx.deleteMessage();
+      await ctx.reply('Выбери группу для активации:', {
+        reply_markup: { inline_keyboard: keyboard }
+      });
     }
-    const match = part.match(/(\d+)([df])(\d+)?(!)?/);
-    if (!match) continue;
-    const count = parseInt(match[1]);
-    const type = match[2];
-    const sides = match[3] ? parseInt(match[3]) : null;
-    const isExplosive = !!match[4];
-    let rolls = [];
+  } else {
+    await ctx.answerCbQuery('Ты не Мастер!');
+  }
+});
 
-    if (type === 'd') {
-      for (let j = 0; j < count; j++) {
-        let roll = Math.floor(Math.random() * sides) + 1;
-        rolls.push(roll);
-        if (isExplosive && roll === sides) {
-          while (roll === sides) {
-            roll = Math.floor(Math.random() * sides) + 1;
-            rolls.push(roll);
-          }
+bot.action(/reactivate_group_(.+)/, async (ctx) => {
+  const userId = ctx.from.id;
+  const [, groupId] = ctx.match;
+  const master = await db.collection('masters').findOne({ userId: userId.toString(), groupId });
+  if (master) {
+    await db.collection('masters').updateOne(
+      { userId: userId.toString(), groupId },
+      { $set: { isActive: true, activatedAt: Date.now() } }
+    );
+    await ctx.deleteMessage();
+    await ctx.reply(`Твоя мощь пробудилась в ${master.groupName}!`);
+  } else {
+    await ctx.answerCbQuery('Ты не Мастер в этой группе!');
+  }
+});
+
+bot.action('deactivate_master', async (ctx) => {
+  const userId = ctx.from.id;
+  const masters = await db.collection('masters').find({ userId: userId.toString(), isActive: true }).toArray();
+  if (masters.length) {
+    if (masters.length === 1) {
+      await db.collection('masters').updateOne(
+        { userId: userId.toString(), groupId: masters[0].groupId },
+        { $set: { isActive: false } }
+      );
+      await ctx.deleteMessage();
+      await ctx.reply(`Ты ушёл в тень из ${masters[0].groupName}!`);
+    } else {
+      const keyboard = masters.map(m => [{ text: m.groupName, callback_data: `deactivate_group_${m.groupId}` }]);
+      await ctx.deleteMessage();
+      await ctx.reply('Выбери группу для деактивации:', {
+        reply_markup: { inline_keyboard: keyboard }
+      });
+    }
+  } else {
+    await ctx.answerCbQuery('Ты не активный Мастер!');
+  }
+});
+
+bot.action(/deactivate_group_(.+)/, async (ctx) => {
+  const userId = ctx.from.id;
+  const [, groupId] = ctx.match;
+  const master = await db.collection('masters').findOne({ userId: userId.toString(), groupId });
+  if (master) {
+    await db.collection('masters').updateOne(
+      { userId: userId.toString(), groupId },
+      { $set: { isActive: false } }
+    );
+    await ctx.deleteMessage();
+    await ctx.reply(`Ты ушёл в тень из ${master.groupName}!`);
+  } else {
+    await ctx.answerCbQuery('Ты не Мастер в этой группе!');
+  }
+});
+
+bot.action('confirm_master', async (ctx) => {
+  const userId = ctx.from.id;
+  const chatId = ctx.chat.id;
+  const username = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
+  const groupName = ctx.chat.title || 'Безымянный притон';
+
+  if (userStates[userId]?.state === 'awaiting_group_confirmation') {
+    const { inviteCode } = userStates[userId];
+    const invite = await db.collection('invites').findOne({ code: inviteCode, used: false, expiresAt: { $gt: Date.now() } });
+    if (invite) {
+      await db.collection('masters').insertOne({
+        userId: userId.toString(),
+        username,
+        groupId: chatId.toString(),
+        groupName,
+        inviteCode,
+        isActive: true,
+        activatedAt: Date.now()
+      });
+      await db.collection('invites').updateOne({ code: inviteCode }, { $set: { used: true } });
+      delete userStates[userId];
+      await ctx.deleteMessage();
+      await ctx.reply(`${username} теперь МАСТЕР этого притона!`);
+      await bot.telegram.sendMessage(userId, `Ты зарегистрирован как Мастер для ${groupName}!`);
+      await ctx.reply('Выбери режим:', {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: 'nDx+!+F/Судьба', callback_data: 'dice_mode' }],
+            [{ text: '1Dx/Судьба', callback_data: 'single_dice_mode' }]
+          ]
+        }
+      });
+    } else {
+      await ctx.deleteMessage();
+      const msg = await ctx.reply('Ты врёшь не тем СИЛАМ, шакалина!');
+      setTimeout(() => {
+        bot.telegram.deleteMessage(chatId, msg.message_id).catch(() => {});
+        bot.telegram.sendMessage(chatId, 'Сосал???').then(sosMsg => {
+          setTimeout(() => bot.telegram.deleteMessage(chatId, sosMsg.message_id).catch(() => {}), 2000);
+        });
+      }, 2000);
+    }
+  } else {
+    await ctx.deleteMessage();
+    const msg = await ctx.reply('Ты врёшь не тем СИЛАМ, шакалина!');
+    setTimeout(() => {
+      bot.telegram.deleteMessage(chatId, msg.message_id).catch(() => {});
+      bot.telegram.sendMessage(chatId, 'Сосал???').then(sosMsg => {
+        setTimeout(() => bot.telegram.deleteMessage(chatId, sosMsg.message_id).catch(() => {}), 2000);
+      });
+    }, 2000);
+  }
+});
+
+// Обработка ввода формулы
+bot.on('text', async (ctx) => {
+  const userId = ctx.from.id;
+  const chatId = ctx.chat.id;
+  const username = ctx.from.username ? `@${ctx.from.username}` : ctx.from.first_name;
+  const state = userStates[userId]?.state;
+
+  if (state === 'awaiting_dice_formula' || state === 'awaiting_single_dice') {
+    if (chatId < 0 && !(await db.collection('masters').findOne({ groupId: chatId.toString(), isActive: true }))) {
+      await ctx.reply('Нет активного Мастера! Подтверди силу Мастера через /start.');
+      return;
+    }
+    const formula = ctx.message.text.trim().toLowerCase();
+    const result = rollDice(formula);
+    if (result) {
+      const response = formatResult(formula, result);
+      await ctx.reply(`${username} кинул ${formula}: ${response}`);
+      if (chatId < 0) {
+        const masters = await db.collection('masters').find({ groupId: chatId.toString(), isActive: true }).toArray();
+        for (const master of masters) {
+          const time = moment().tz('Europe/Moscow').format('HH:mm');
+          await bot.telegram.sendMessage(master.userId, `${time} ${username} кинул ${formula}: ${response}`);
         }
       }
-      const sum = rolls.reduce((a, b) => a + b, 0);
-      total += (parts[i - 1] === '-' ? -1 : 1) * sum;
-      results.push(`${rolls.join(', ')} [d${sides}${isExplosive ? '!' : ''}]`);
-    } else if (type === 'f') {
-      rolls = Array(count).fill().map(() => {
-        const r = Math.random();
-        return r < 0.33 ? -1 : r < 0.66 ? 0 : 1;
-      });
-      const sum = rolls.reduce((a, b) => a + b, 0);
-      total += (parts[i - 1] === '-' ? -1 : 1) * sum;
-      results.push(`4f: [${rolls.map(r => r === -1 ? ' - ' : r === 0 ? '   ' : ' + ').join(' | ')}]`);
-      fateResult = `<b>${fateResultNames[sum] || ''}</b>`;
+    } else {
+      await ctx.reply('Неверная формула! Пример: 2d6+1d8, 4f');
     }
-  }
-
-  return { total, rolls: results, fateResult };
-}
-
-// Бросок кубов судьбы
-function rollFateDice() {
-  const rolls = Array(4).fill().map(() => {
-    const r = Math.random();
-    return r < 0.33 ? -1 : r < 0.66 ? 0 : 1;
-  });
-  const total = rolls.reduce((sum, r) => sum + r, 0);
-  return {
-    total,
-    rolls: [`4f: [${rolls.map(r => r === -1 ? ' - ' : r === 0 ? '   ' : ' + ').join(' | ')}]`],
-    fateResult: `<b>${fateResultNames[total] || ''}</b>`
-  };
-}
-
-// Чистка старых сообщений бота
-setInterval(async () => {
-  const now = Date.now();
-  for (const key in messageIds) {
-    if (key.startsWith('result_') && now - messageIds[key].timestamp > 3600000) {
-      const [_, chatId, id] = key.split('_');
-      try {
-        await bot.deleteMessage(chatId, id);
-        delete messageIds[key];
-      } catch (e) {
-        console.error('Error deleting old result:', e.message);
+    delete userStates[userId];
+    await ctx.reply('Выбери режим:', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: 'nDx+!+F/Судьба', callback_data: 'dice_mode' }],
+          [{ text: '1Dx/Судьба', callback_data: 'single_dice_mode' }]
+        ]
       }
+    });
+  } else if (state === 'awaiting_check' && await isMaster(userId, chatId.toString())) {
+    const [formula, dc] = ctx.message.text.trim().toLowerCase().split(/\s+/);
+    const result = rollDice(formula);
+    if (result && dc && !isNaN(dc)) {
+      await ctx.reply(formatCheck(formula, parseInt(dc), result));
+    } else {
+      await ctx.reply('Неверный формат! Пример: 1d20+5 15');
+    }
+    delete userStates[userId];
+  } else if (state === 'awaiting_fate_check' && await isMaster(userId, chatId.toString())) {
+    const dc = parseInt(ctx.message.text.trim());
+    if (!isNaN(dc)) {
+      const result = rollDice('4f');
+      await ctx.reply(formatFateCheck(dc, result));
+    } else {
+      await ctx.reply('Неверный DC! Пример: 2');
+    }
+    delete userStates[userId];
+  } else if (ctx.message.text.startsWith('/master')) {
+    const code = ctx.message.text.split(' ')[1];
+    if (!code) {
+      await ctx.reply('Введи код: /master <код>');
+      return;
+    }
+    const invite = await db.collection('invites').findOne({ code, used: false, expiresAt: { $gt: Date.now() } });
+    if (invite) {
+      userStates[userId] = { state: 'awaiting_group_confirmation', inviteCode: code };
+      await ctx.reply('Скрижали не врали! Подтверди силу Мастера в чате с бомжами-убивцами после /start...');
+      setTimeout(() => delete userStates[userId], 10 * 60 * 1000); // 10 минут тайм-аут
+    } else {
+      await ctx.reply('Неверный или использованный код');
+    }
+  } else if (ctx.message.text === '/add_master' && chatId < 0) {
+    if (await db.collection('masters').findOne({ userId: userId.toString() })) {
+      userStates[userId] = { state: 'awaiting_group_confirmation', inviteCode: 'reuse' };
+      await ctx.reply('Подтверди силу Мастера!', {
+        reply_markup: {
+          inline_keyboard: [[{ text: 'Подтверди силу Мастера!', callback_data: 'confirm_master' }]]
+        }
+      });
+      setTimeout(() => delete userStates[userId], 10 * 60 * 1000); // 10 минут тайм-аут
+    } else {
+      await ctx.reply('Ты не Мастер! Зарегистрируйся через /master <код>.');
     }
   }
-}, 3600000);
-
-app.listen(3000, () => {
-  console.log('Bot server running on port 3000');
 });
+
+// Запуск бота
+connectToMongo().then(() => {
+  bot.launch();
+  console.log('Bot started');
+}).catch(err => console.error('MongoDB connection error:', err));
