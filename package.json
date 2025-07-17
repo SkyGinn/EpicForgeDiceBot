@@ -1,13 +1,14 @@
 {
-  "name": "dnd-dice-bot",
+  "name": "epic-forge-dice-bot",
   "version": "1.0.0",
-  "description": "D&D Dice Bot",
+  "description": "Epic Forge Dice Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.17.1",
-    "node-telegram-bot-api": "^0.61.0"
+    "telegraf": "^4.12.2",
+    "mongodb": "^4.17.1",
+    "moment-timezone": "^0.5.43"
   }
 }
